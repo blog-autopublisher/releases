@@ -1,11 +1,6 @@
 {
  "v": 1,
  "date": "2026-11-22 22:51",
- "revoked": [
-  {
-   "id": "aed7d85d",
-   "at": "2026-11-22"
-  }
- ],
- "sig": "pHukngzZYGBlA1nyZ4bcfSFUDTfCGnxbekTgQ9ILTJbVfjiFv3RRTwWzgJyjoduUZQQLXy3ko/z0qgZjHB6aBA=="
+ "revoked": [],
+ "sig": "h05+7akZ6uVDdO+q5IG9imG/eFlP8XRstSdeOJ/xBqSc6Udt5/iuIl8l7MIUrTb401tQhYrIU6p+f31JcHPJAw=="
 }
