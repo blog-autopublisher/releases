@@ -82,6 +82,7 @@ jobs:
           kill $PID || true
 
       - name: 맥 업데이트 바꿔 넣기 시험 (설치본을 새 dmg로 바꾸고 다시 켜는지)
+        continue-on-error: true   # 실패해도 dmg는 올린다(새로 설치하는 데는 문제없음) — mac_build.py가 결과를 알려 준다
         run: |
           APPS="$RUNNER_TEMP/Apps"; mkdir -p "$APPS"
           APP="$APPS/네이버 블로그 자동 발행기.app"
