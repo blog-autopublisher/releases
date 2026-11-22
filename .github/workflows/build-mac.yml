@@ -61,9 +61,22 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
           ls -la dist/mac
 
-      - name: 만든 앱 켜 보기 (창 없이 서버만 — 응답하면 통과)
+      - name: 앱 안 부품 확인 (암호·SSL 부품이 들어갔는지)
         run: |
           APP="dist/네이버 블로그 자동 발행기.app"
+          find "$APP" \( -path "*cryptography*" -name "*.so" \) -o -name "_ssl*.so" -o -name "libssl*.dylib" | sed "s|$APP/||" | head -20
+          file "$(find "$APP" -path "*cryptography*" -name "_rust*.so" | head -1)" || true
+
+      - name: 만든 앱 켜 보기 (창 없이 서버만 — 응답·키 검사·업데이트 확인)
+        run: |
+          APP="dist/네이버 블로그 자동 발행기.app"
+          export NBA_KEY=$(uv run python -c "
+          from datetime import date
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+          from app.core import license
+          k = Ed25519PrivateKey.generate().private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+          print(license.sign(k, 'probe', date.today(), None, 'probe'))")
           export NBA_APP_DATA_DIR="$RUNNER_TEMP/nba-smoke"
           "$APP/Contents/MacOS/NaverBlogAutoPublisher" --no-open > "$RUNNER_TEMP/smoke.log" 2>&1 &
           PID=$!
@@ -78,11 +91,25 @@ jobs:
           print("status ok:", s["app"], "| license:", s["license"]["code"] if not s["license"]["ok"] else "ok")
           u = get("/api/update")
           print("update check:", {k: u.get(k) for k in ("current", "latest", "newer", "error")})
+          import os, urllib.error
+          q = urllib.request.Request(f"http://127.0.0.1:{r['port']}/api/license", data=json.dumps({"key": os.environ["NBA_KEY"]}).encode(),
+                                     headers={"X-NBA-CLI": r["cli_token"], "Content-Type": "application/json"}, method="POST")
+          try:
+              urllib.request.urlopen(q, timeout=20); code = "200?"
+          except urllib.error.HTTPError as e:
+              code = f"{e.code} {json.load(e).get('code')}"
+          print("license check (남의 열쇠로 만든 키 → 400 E-LIC-02여야 함):", code)
+          bad = []
+          if not code.startswith("400 E-LIC-02"): bad.append("키 검사")
+          if u.get("error"): bad.append("업데이트 확인")
+          if bad: raise SystemExit("실패: " + ", ".join(bad))
           PY
+          RC=$?
           kill $PID || true
+          echo "--- app log ---"; tail -30 "$RUNNER_TEMP/smoke.log" || true; tail -30 "$NBA_APP_DATA_DIR"/logs/*.log 2>/dev/null || true
+          exit $RC
 
       - name: 맥 업데이트 바꿔 넣기 시험 (설치본을 새 dmg로 바꾸고 다시 켜는지)
-        continue-on-error: true   # 실패해도 dmg는 올린다(새로 설치하는 데는 문제없음) — mac_build.py가 결과를 알려 준다
         run: |
           APPS="$RUNNER_TEMP/Apps"; mkdir -p "$APPS"
           APP="$APPS/네이버 블로그 자동 발행기.app"
@@ -105,6 +132,7 @@ jobs:
           sleep 5; pkill -f "Apps/.*NaverBlogAutoPublisher" || true
 
       - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}   # 앞 시험이 실패해도 만든 dmg는 올린다 — 실패한 단계는 mac_build.py가 알려 준다
         with:
           name: mac-${{ matrix.target.arch }}
           path: dist/mac/*.dmg
