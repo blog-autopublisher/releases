@@ -1,0 +1,112 @@
+# 맥용 설치 파일(.dmg)을 '공개 배포 저장소'의 GitHub 맥 컴퓨터에서 만든다 (NBA-03 10장 v0.10.29).
+# 이 파일의 정본은 비공개 코드 저장소 packaging/public-build-mac.yml — packaging/mac_build.py --sync가 공개 저장소 .github/workflows/build-mac.yml로 올린다.
+# - 공개 저장소는 GitHub 기본 러너가 무료·무제한(비공개 저장소의 월 맥 시간을 쓰지 않음).
+# - 코드는 비공개 저장소에서 빌드할 때만 가져온다: 비밀 칸 SOURCE_REPO(저장소 이름)·SOURCE_TOKEN(그 저장소 하나만 '내용 읽기'인 열쇠).
+#   코드는 이 공개 저장소에 올라가지 않고, 산출물은 dmg만(3일 보관).
+# - 공개 로그에 코드가 찍히지 않게 시험은 --tb=no. 손으로만 실행(자동 실행 없음 — 포크·끌어오기 요청은 비밀 칸을 쓸 수 없음).
+# - 서명·공증 없음: 받는 맥에서 처음 한 번 [그래도 열기].
+name: build-mac
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "만들 코드(비공개 저장소의 가지·태그)"
+        type: string
+        default: main
+      arch:
+        description: "만들 종류: both(애플 칩+인텔) / arm64(애플 칩) / x86_64(인텔)"
+        type: choice
+        default: both
+        options: [both, arm64, x86_64]
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    name: mac-${{ matrix.target.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(inputs.arch == 'arm64' && '[{"arch":"arm64","os":"macos-15"}]' || inputs.arch == 'x86_64' && '[{"arch":"x86_64","os":"macos-15-intel"}]' || '[{"arch":"arm64","os":"macos-15"},{"arch":"x86_64","os":"macos-15-intel"}]') }}
+    runs-on: ${{ matrix.target.os }}
+    timeout-minutes: 45
+    steps:
+      - name: 코드 가져오기 (비공개 저장소 · 읽기 전용 열쇠)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ secrets.SOURCE_REPO }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: 부품 설치 (uv.lock 그대로)
+        run: uv sync --frozen --group dev
+
+      - name: 자동 시험 (실패해도 빌드는 계속 — 공개 로그라 코드 줄은 찍지 않음)
+        run: uv run pytest -q --tb=no -p no:cacheprovider
+        continue-on-error: true
+
+      - name: 앱·dmg 만들기
+        run: uv run --group dev python packaging/build_mac.py --dmg
+
+      - name: 만든 앱 간단 확인 (서명·실행 파일·버전)
+        run: |
+          APP="dist/네이버 블로그 자동 발행기.app"
+          codesign --verify --deep --strict "$APP"
+          file "$APP/Contents/MacOS/NaverBlogAutoPublisher"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
+          ls -la dist/mac
+
+      - name: 만든 앱 켜 보기 (창 없이 서버만 — 응답하면 통과)
+        run: |
+          APP="dist/네이버 블로그 자동 발행기.app"
+          export NBA_APP_DATA_DIR="$RUNNER_TEMP/nba-smoke"
+          "$APP/Contents/MacOS/NaverBlogAutoPublisher" --no-open > "$RUNNER_TEMP/smoke.log" 2>&1 &
+          PID=$!
+          for i in $(seq 1 90); do [ -f "$NBA_APP_DATA_DIR/runtime.json" ] && break; sleep 1; done
+          python3 - "$NBA_APP_DATA_DIR/runtime.json" <<'PY'
+          import json, sys, urllib.request
+          r = json.load(open(sys.argv[1]))
+          def get(path):
+              q = urllib.request.Request(f"http://127.0.0.1:{r['port']}{path}", headers={"X-NBA-CLI": r["cli_token"]})
+              return json.load(urllib.request.urlopen(q, timeout=20))
+          s = get("/api/status")
+          print("status ok:", s["app"], "| license:", s["license"]["code"] if not s["license"]["ok"] else "ok")
+          u = get("/api/update")
+          print("update check:", {k: u.get(k) for k in ("current", "latest", "newer", "error")})
+          PY
+          kill $PID || true
+
+      - name: 맥 업데이트 바꿔 넣기 시험 (설치본을 새 dmg로 바꾸고 다시 켜는지)
+        run: |
+          APPS="$RUNNER_TEMP/Apps"; mkdir -p "$APPS"
+          APP="$APPS/네이버 블로그 자동 발행기.app"
+          ditto "dist/네이버 블로그 자동 발행기.app" "$APP"
+          touch "$APP/old-marker"
+          DMG=$(ls dist/mac/*.dmg | head -1)
+          export NBA_APP_DATA_DIR="$RUNNER_TEMP/nba-upd"; mkdir -p "$NBA_APP_DATA_DIR/updates"
+          sleep 3 & PID=$!
+          uv run python - "$DMG" "$APP" "$PID" > "$RUNNER_TEMP/upd.sh" <<'PY'
+          import sys
+          from pathlib import Path
+          from app.core import update
+          print(update.mac_installer_script(Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3])))
+          PY
+          bash "$RUNNER_TEMP/upd.sh" || true
+          cat "$NBA_APP_DATA_DIR/updates/install.log"
+          test -d "$APP" && test ! -e "$APP/old-marker" && test ! -e "$APP.old" && test ! -e "$APP.new"
+          grep -q "== done" "$NBA_APP_DATA_DIR/updates/install.log"
+          echo "바꿔 넣기 통과"
+          sleep 5; pkill -f "Apps/.*NaverBlogAutoPublisher" || true
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mac-${{ matrix.target.arch }}
+          path: dist/mac/*.dmg
+          archive: false
+          if-no-files-found: error
+          retention-days: 3
